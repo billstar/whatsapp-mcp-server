@@ -110,6 +110,13 @@ export const SendMessageInputSchema = z.object({
 
 export type SendMessageInput = z.infer<typeof SendMessageInputSchema>;
 
+export const SyncHistoryInputSchema = z.object({
+  groupName: z.string().min(1, 'Group name is required'),
+  targetCount: z.number().int().positive().max(500).default(500),
+});
+
+export type SyncHistoryInput = z.infer<typeof SyncHistoryInputSchema>;
+
 export const ReplyToMessageInputSchema = z.object({
   groupName: z.string().min(1, 'Group name is required'),
   messageId: z.string().min(1, 'Message ID to reply to is required'),
