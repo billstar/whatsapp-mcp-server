@@ -140,7 +140,7 @@ interface BufferEntry {
 
 class MessageBuffer {
   private buffers = new Map<string, BufferEntry[]>();
-  readonly maxPerGroup = 500;
+  readonly maxPerGroup = 1500;
   private readonly snapshotPath: string;
   private snapshotInterval: NodeJS.Timeout | null = null;
   private _lastUpsertTs = 0;
@@ -220,7 +220,7 @@ class MessageBuffer {
     return this.buffers.get(jid) || [];
   }
 
-  search(query: string, jid?: string, limit = 50): BufferEntry[] {
+  search(query: string, jid?: string, limit = 200): BufferEntry[] {
     const lowerQuery = query.toLowerCase();
     const results: BufferEntry[] = [];
 
@@ -430,7 +430,7 @@ export class WhatsAppClient {
     options: GetMessagesOptions = {},
   ): Promise<WhatsAppMessageEntry[]> {
     this.ensureReady();
-    const { limit = 200, after, before } = options;
+    const { limit = 1000, after, before } = options;
     log('info', `getGroupMessages: groupId=${groupId}, limit=${limit}`);
 
     const entries = this.buffer.get(groupId, limit, after, before);
@@ -466,7 +466,7 @@ export class WhatsAppClient {
    */
   async syncGroupHistory(
     groupId: string,
-    targetCount = 500,
+    targetCount = 1500,
   ): Promise<{ synced: number; total: number; note?: string }> {
     this.ensureReady();
     const cap = Math.min(targetCount, this.buffer.maxPerGroup);
@@ -590,7 +590,7 @@ export class WhatsAppClient {
   // Export
   // -----------------------------------------------------------------------
 
-  async exportChat(groupId: string, limit = 500): Promise<string> {
+  async exportChat(groupId: string, limit = 1500): Promise<string> {
     this.ensureReady();
     log('info', `exportChat: groupId=${groupId}, limit=${limit}`);
 
