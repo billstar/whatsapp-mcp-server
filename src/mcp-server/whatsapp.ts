@@ -5,6 +5,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import type { WASocket, WAMessage, GroupMetadata } from '@whiskeysockets/baileys';
 import pino from 'pino';
+import qrcode from 'qrcode-terminal';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { format } from 'date-fns';
@@ -611,7 +612,11 @@ export class WhatsAppClient {
       },
     );
 
-    this.sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+    this.sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+      if (qr) {
+        log('info', 'Scan this QR code with WhatsApp > Linked Devices > Link a Device:');
+        qrcode.generate(qr, { small: true }, (code: string) => process.stderr.write(code + '\n'));
+      }
       if (connection === 'open') {
         log('info', 'Connection open');
         this.connectionOpen = true;
