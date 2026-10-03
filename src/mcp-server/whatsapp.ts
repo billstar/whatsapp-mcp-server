@@ -222,7 +222,7 @@ class MessageBuffer {
     return this.buffers.get(jid) || [];
   }
 
-  search(query: string, jid?: string, limit = 200): BufferEntry[] {
+  search(query: string, jid?: string, limit = 50): BufferEntry[] {
     const lowerQuery = query.toLowerCase();
     const results: BufferEntry[] = [];
 
@@ -323,13 +323,30 @@ export class WhatsAppClient {
 
   // Anchored to the package root so the paired session is found no matter
   // which directory the MCP client launches the server from.
-  private static readonly AUTH_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.baileys_auth');
+  /**
+   * Session directory, anchored to the package root. Keyed by session name
+   * (`.baileys_auth-<name>`) so separate sessions never share credentials.
+   * Installs that predate per-session directories keep using `.baileys_auth`
+   * when it exists and the named directory doesn't, so no paired session moves.
+   */
+  static resolveAuthDir(sessionName: string, root = join(dirname(fileURLToPath(import.meta.url)), '..', '..')): string {
+    if (!/^[A-Za-z0-9._-]+$/.test(sessionName) || sessionName.startsWith('.')) {
+      throw new Error(`Invalid WHATSAPP_SESSION_NAME "${sessionName}": use letters, digits, ".", "_" or "-"`);
+    }
+    const named = join(root, `.baileys_auth-${sessionName}`);
+    const legacy = join(root, '.baileys_auth');
+    if (existsSync(named)) return named;
+    if (existsSync(legacy)) return legacy;
+    return named;
+  }
+
+  private readonly authDir: string;
   private static readonly BAILEYS_LOGGER = pino({ level: 'silent' }, pino.destination(2));
-  private static readonly CONTACTS_PATH = join(WhatsAppClient.AUTH_DIR, 'contacts.json');
 
   constructor(private readonly sessionName: string) {
-    this.buffer = new MessageBuffer(WhatsAppClient.AUTH_DIR);
-    this.contacts = new ContactBook(WhatsAppClient.CONTACTS_PATH);
+    this.authDir = WhatsAppClient.resolveAuthDir(sessionName);
+    this.buffer = new MessageBuffer(this.authDir);
+    this.contacts = new ContactBook(join(this.authDir, 'contacts.json'));
   }
 
   // -----------------------------------------------------------------------
@@ -337,7 +354,7 @@ export class WhatsAppClient {
   // -----------------------------------------------------------------------
 
   async initialize(): Promise<void> {
-    log('info', 'Initializing WhatsApp client (Baileys)...');
+    log('info', `Initializing WhatsApp client (Baileys), session dir: ${this.authDir}`);
 
     this.loadContacts();
     const rehydrated = this.buffer.rehydrate();
@@ -355,7 +372,7 @@ export class WhatsAppClient {
   }
 
   private async createSocket(): Promise<void> {
-    const { state, saveCreds } = await useMultiFileAuthState(WhatsAppClient.AUTH_DIR);
+    const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
     this.saveCreds = saveCreds;
 
     const { version } = await fetchLatestBaileysVersion();
@@ -441,7 +458,7 @@ export class WhatsAppClient {
     options: GetMessagesOptions = {},
   ): Promise<WhatsAppMessageEntry[]> {
     this.ensureReady();
-    const { limit = 1000, after, before } = options;
+    const { limit = 200, after, before } = options;
     log('info', `getGroupMessages: groupId=${groupId}, limit=${limit}`);
 
     const entries = this.buffer.get(groupId, limit, after, before);
@@ -601,7 +618,7 @@ export class WhatsAppClient {
   // Export
   // -----------------------------------------------------------------------
 
-  async exportChat(groupId: string, limit = 1500): Promise<string> {
+  async exportChat(groupId: string, limit = 500): Promise<string> {
     this.ensureReady();
     log('info', `exportChat: groupId=${groupId}, limit=${limit}`);
 

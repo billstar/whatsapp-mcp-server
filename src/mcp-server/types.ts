@@ -56,7 +56,7 @@ export type GroupInfo = z.infer<typeof GroupInfoSchema>;
 
 export const ExportOptionsSchema = z.object({
   groupName: z.string().min(1, 'Group name is required'),
-  limit: z.number().int().positive().max(1500).default(1500),
+  limit: z.number().int().positive().max(1500).default(500),
 });
 
 export type ExportOptions = z.infer<typeof ExportOptionsSchema>;
@@ -69,7 +69,7 @@ export type ListGroupsInput = z.infer<typeof ListGroupsInputSchema>;
 
 export const GetMessagesInputSchema = z.object({
   groupName: z.string().min(1, 'Group name is required'),
-  limit: z.number().int().positive().max(1500).default(1000),
+  limit: z.number().int().positive().max(1500).default(200),
   afterDate: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be in YYYY-MM-DD format')
@@ -84,7 +84,7 @@ export type GetMessagesInput = z.infer<typeof GetMessagesInputSchema>;
 
 export const ExportChatInputSchema = z.object({
   groupName: z.string().min(1, 'Group name is required'),
-  limit: z.number().int().positive().max(1500).default(1500),
+  limit: z.number().int().positive().max(1500).default(500),
 });
 
 export type ExportChatInput = z.infer<typeof ExportChatInputSchema>;
@@ -92,7 +92,7 @@ export type ExportChatInput = z.infer<typeof ExportChatInputSchema>;
 export const SearchMessagesInputSchema = z.object({
   query: z.string().min(1, 'Search query is required'),
   groupName: z.string().min(1).optional(),
-  limit: z.number().int().positive().max(500).default(200),
+  limit: z.number().int().positive().max(500).default(50),
 });
 
 export type SearchMessagesInput = z.infer<typeof SearchMessagesInputSchema>;

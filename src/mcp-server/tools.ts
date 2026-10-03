@@ -175,7 +175,7 @@ export function registerTools(server: Server, client: WhatsAppClient): void {
         name: 'whatsapp_get_messages',
         description:
           'Get messages from a WhatsApp group. Supports fuzzy group name matching, message count limit, and date range filtering. ' +
-          'Prefer a large limit — fetch the full buffered history (default 1000) for meaningful context; only use a small limit for a quick peek at the latest few.',
+          'Default 200 keeps context small; raise the limit (up to 1500) when a task needs deeper history.',
         inputSchema: {
           type: 'object' as const,
           properties: {
@@ -185,8 +185,8 @@ export function registerTools(server: Server, client: WhatsAppClient): void {
             },
             limit: {
               type: 'number',
-              description: 'Maximum messages to return (default: 1000, max: 1500). Use the default or higher unless you specifically only want the latest handful.',
-              default: 1000,
+              description: 'Maximum messages to return (default: 200, max: 1500)',
+              default: 200,
             },
             afterDate: {
               type: 'string',
@@ -213,8 +213,8 @@ export function registerTools(server: Server, client: WhatsAppClient): void {
             },
             limit: {
               type: 'number',
-              description: 'Maximum messages to include (default: 1500, max: 1500)',
-              default: 1500,
+              description: 'Maximum messages to include (default: 500, max: 1500)',
+              default: 500,
             },
           },
           required: ['groupName'],
@@ -260,8 +260,8 @@ export function registerTools(server: Server, client: WhatsAppClient): void {
             },
             limit: {
               type: 'number',
-              description: 'Maximum results to return (default: 200, max: 500)',
-              default: 200,
+              description: 'Maximum results to return (default: 50, max: 500)',
+              default: 50,
             },
           },
           required: ['query'],

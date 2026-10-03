@@ -89,7 +89,7 @@ npm run build
 WHATSAPP_SESSION_NAME=my-session node dist/mcp-server/index.js
 ```
 
-Scan the QR code with WhatsApp on your phone. Credentials and Signal keys cache in `.baileys_auth-my-session/` — you won't need to scan again unless you remove that directory or revoke the linked device from your phone.
+Scan the QR code with WhatsApp on your phone. Credentials and Signal keys cache in `.baileys_auth-my-session/` — you won't need to scan again unless you remove that directory or revoke the linked device from your phone. Each `WHATSAPP_SESSION_NAME` gets its own directory under the package root, whichever directory you launch the server from. Installs from before per-session directories keep using an existing `.baileys_auth/` until a `.baileys_auth-<session>/` exists, so upgrading never forces a re-pair.
 
 ### Register with Claude Code
 
