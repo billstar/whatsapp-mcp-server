@@ -13,6 +13,7 @@ exports/briefings/
 # Persistence
 certs/
 config/com.ericporres.whatsapp-tunnel.plist
+config/whatsapp-mcp.service
 
 # OAuth secrets and issued tokens (never commit)
 .mcp-credentials.json

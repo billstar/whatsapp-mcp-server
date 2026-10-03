@@ -11,6 +11,7 @@ import {
   GroupInfoInputSchema,
   SendMessageInputSchema,
   ReplyToMessageInputSchema,
+  SyncHistoryInputSchema,
   type WhatsAppGroup,
 } from './types.js';
 
@@ -173,7 +174,8 @@ export function registerTools(server: Server, client: WhatsAppClient): void {
       {
         name: 'whatsapp_get_messages',
         description:
-          'Get messages from a WhatsApp group. Supports fuzzy group name matching, message count limit, and date range filtering.',
+          'Get messages from a WhatsApp group. Supports fuzzy group name matching, message count limit, and date range filtering. ' +
+          'Prefer a large limit — fetch the full buffered history (default 1000) for meaningful context; only use a small limit for a quick peek at the latest few.',
         inputSchema: {
           type: 'object' as const,
           properties: {
@@ -183,8 +185,8 @@ export function registerTools(server: Server, client: WhatsAppClient): void {
             },
             limit: {
               type: 'number',
-              description: 'Maximum messages to return (default: 200, max: 500)',
-              default: 200,
+              description: 'Maximum messages to return (default: 1000, max: 1500). Use the default or higher unless you specifically only want the latest handful.',
+              default: 1000,
             },
             afterDate: {
               type: 'string',
@@ -211,8 +213,31 @@ export function registerTools(server: Server, client: WhatsAppClient): void {
             },
             limit: {
               type: 'number',
-              description: 'Maximum messages to include (default: 500, max: 500)',
-              default: 500,
+              description: 'Maximum messages to include (default: 1500, max: 1500)',
+              default: 1500,
+            },
+          },
+          required: ['groupName'],
+        },
+      },
+      {
+        name: 'whatsapp_sync_history',
+        description:
+          'Backfill older message history for a group from WhatsApp servers (on-demand sync). ' +
+          'Walks backwards from the oldest locally-known message, so the group must already have ' +
+          'at least one message buffered. History is bounded by what WhatsApp still retains and ' +
+          'by the 1500-message-per-group local cap. May take up to a few minutes for a full group.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            groupName: {
+              type: 'string',
+              description: 'Group name (fuzzy-matched) or exact group JID (e.g. 12036...@g.us). If the name matches multiple groups, the call fails and returns the JIDs to disambiguate.',
+            },
+            targetCount: {
+              type: 'number',
+              description: 'Desired total messages to have buffered for the group after sync (default: 1500, max: 1500)',
+              default: 1500,
             },
           },
           required: ['groupName'],
@@ -235,8 +260,8 @@ export function registerTools(server: Server, client: WhatsAppClient): void {
             },
             limit: {
               type: 'number',
-              description: 'Maximum results to return (default: 50, max: 200)',
-              default: 50,
+              description: 'Maximum results to return (default: 200, max: 500)',
+              default: 200,
             },
           },
           required: ['query'],
@@ -377,6 +402,21 @@ export function registerTools(server: Server, client: WhatsAppClient): void {
 
           const exported = await client.exportChat(result.group.id, parsed.limit);
           return { content: [{ type: 'text' as const, text: exported }] };
+        }
+
+        case 'whatsapp_sync_history': {
+          const parsed = SyncHistoryInputSchema.parse(args);
+          const result = await resolveGroupOrError(client, parsed.groupName);
+          if (result.error) return { content: [result.error], isError: true };
+
+          const res = await client.syncGroupHistory(result.group.id, parsed.targetCount);
+
+          const text = res.note
+            ? `Sync for "${result.group.name}": ${res.note}`
+            : `Synced "${result.group.name}": +${res.synced} older messages backfilled ` +
+              `(${res.total} now buffered${res.total >= 1500 ? ', at local cap' : ''}).`;
+
+          return { content: [{ type: 'text' as const, text }] };
         }
 
         case 'whatsapp_search_messages': {

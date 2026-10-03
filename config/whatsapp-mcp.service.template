@@ -1,0 +1,25 @@
+# systemd unit for the WhatsApp MCP HTTP server (Linux).
+# Copy to /etc/systemd/system/whatsapp-mcp.service and replace placeholders:
+#   __USER__     → the user/group to run as (e.g. web)
+#   __PROJECT__  → absolute path to this project
+#   __BUN__      → absolute path to the bun binary (`which bun`)
+#
+# Runs the TypeScript source directly with bun — no build step. bun auto-loads
+# .env from WorkingDirectory, so MCP_HTTP_PORT / WHATSAPP_SESSION_NAME come from
+# there. Then: systemctl daemon-reload && systemctl enable --now whatsapp-mcp
+[Unit]
+Description=WhatsApp MCP HTTP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__PROJECT__
+ExecStart=__BUN__ run __PROJECT__/src/mcp-server/http-server.ts
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

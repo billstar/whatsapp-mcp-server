@@ -2,7 +2,7 @@
 
 **Your WhatsApp groups are a live intelligence network. This server lets Claude read them.**
 
-An open-source [MCP](https://modelcontextprotocol.io) server that connects WhatsApp group chats to Claude (and any MCP-compatible AI client). It exposes seven tools for reading, searching, exporting, and replying to group conversations — plus a chat intelligence processor that extracts themes, opportunities, and actionable briefings from hundreds of messages.
+An open-source [MCP](https://modelcontextprotocol.io) server that connects WhatsApp group chats to Claude (and any MCP-compatible AI client). It exposes eight tools for reading, searching, exporting, backfilling history, and replying to group conversations — plus a chat intelligence processor that extracts themes, opportunities, and actionable briefings from hundreds of messages.
 
 I built this because I'm in a dozen professional WhatsApp groups — practitioners, investors, founders — where the information density is remarkable and the retrieval rate is abysmal. WhatsApp is optimized for *conversation*, not *comprehension*. This server fixes that.
 
@@ -10,7 +10,7 @@ I built this because I'm in a dozen professional WhatsApp groups — practitione
 
 ## What It Does
 
-**Seven MCP tools** give Claude (or any MCP client) structured access to your WhatsApp groups:
+**Eight MCP tools** give Claude (or any MCP client) structured access to your WhatsApp groups:
 
 | Tool | What It Does |
 |------|-------------|
@@ -19,6 +19,7 @@ I built this because I'm in a dozen professional WhatsApp groups — practitione
 | `whatsapp_group_info` | Metadata, participants, descriptions |
 | `whatsapp_search_messages` | Keyword search across all groups or scoped to one |
 | `whatsapp_export_chat` | Full export in WhatsApp's native `.txt` format |
+| `whatsapp_sync_history` | On-demand backfill of older group messages from WhatsApp servers |
 | `whatsapp_send_message` | Send a message to any group (fuzzy name matching) |
 | `whatsapp_reply_to_message` | Reply to a specific message as a quoted reply |
 
@@ -60,7 +61,7 @@ WhatsApp has no open API for group chats. The Business API is for customer messa
 
 Every read and write flows through an **AsyncMutex** that serializes WhatsApp operations behind a FIFO queue with a 100ms minimum interval. Baileys is reentrant-safe, but Signal Protocol session setup on unfamiliar recipients benefits from serialization, and the mutex keeps us well under WhatsApp's rate-limit thresholds without having to reason about them explicitly.
 
-Messages stream in over the WebSocket and land in an **in-memory ring buffer** — 500 messages per group, JID-keyed — that the tool layer reads from. The buffer snapshots to `.baileys_auth-<session>/buffer.json` every 60 seconds and rehydrates on boot. This is load-bearing, not optional: the `messages.history-set` event that Baileys emits on first pairing is a one-shot, so on any reconnect the snapshot is the only thing standing between you and a cold buffer.
+Messages stream in over the WebSocket and land in an **in-memory ring buffer** — 1500 messages per group, JID-keyed — that the tool layer reads from. The buffer snapshots to `.baileys_auth-<session>/buffer.json` every 60 seconds and rehydrates on boot. This is load-bearing, not optional: the `messages.history-set` event that Baileys emits on first pairing is a one-shot, so on any reconnect the snapshot is the only thing standing between you and a cold buffer. For groups that need more history after pairing, `whatsapp_sync_history` walks backwards from the oldest buffered message via Baileys `fetchMessageHistory`.
 
 A **readiness gate** keeps this honest. Tool calls return `503 Service Unavailable` until the WebSocket has reached `connection.update → open` AND the buffer is warm (either `messages.history-set` has drained or 30 seconds have elapsed). The server never crashes into half-initialized state, and clients get a clean retryable error instead.
 
@@ -185,6 +186,19 @@ chmod +x scripts/setup-persistence.sh
 
 Templates for the LaunchAgent plists are in `config/`. The script substitutes your paths, your chosen port, and your tunnel token, then loads them.
 
+### Linux Persistence (systemd)
+
+For always-on operation on Linux, copy the unit template and fill in the placeholders:
+
+```bash
+# config/whatsapp-mcp.service.template → replace __USER__, __PROJECT__, __BUN__
+sudo cp config/whatsapp-mcp.service /etc/systemd/system/whatsapp-mcp.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now whatsapp-mcp
+```
+
+The template runs the TypeScript source directly with bun (no build step). Keep the concrete `config/whatsapp-mcp.service` local — it is gitignored.
+
 ---
 
 ## Configuring the Intelligence Processor
@@ -238,7 +252,7 @@ src/
     ├── parser.ts         # Multi-format chat parser
     ├── analyzer.ts       # Theme/idea/opportunity extraction (← customize this)
     └── briefing.ts       # Formatted intelligence briefing output
-config/                   # LaunchAgent plist templates
+config/                   # LaunchAgent plist + systemd unit templates
 scripts/                  # Setup automation
 plugin/                   # Cowork slash command plugin
 ```
@@ -249,7 +263,7 @@ plugin/                   # Cowork slash command plugin
 
 **Baileys over a headless browser.** An earlier cut of this server drove WhatsApp Web through Puppeteer. It worked, but every failure mode was a browser failure — page-context crashes on large fetches, stale DOM references after reconnects, memory leaks from orphaned Chromium processes. Baileys speaks the WhatsApp Multi-Device protocol directly over a WebSocket. No browser, no DOM, no Chromium. Reconnects take two seconds instead of fifteen, and the whole surface area collapses to "is the socket open and is the buffer warm."
 
-**In-memory ring buffer + disk snapshot.** Baileys streams messages in real time via `messages.upsert`, but its historical sync (`messages.history-set`) fires **once**, on the initial pairing. Every subsequent reconnect delivers only live traffic. That's a trap: a restart would otherwise start from an empty buffer and tools would return stale or partial results. The server keeps a 500-message-per-group ring buffer in memory, snapshots it to `.baileys_auth-<session>/buffer.json` every 60 seconds, and rehydrates on boot. The snapshot is load-bearing — do not treat it as a cache.
+**In-memory ring buffer + disk snapshot.** Baileys streams messages in real time via `messages.upsert`, but its historical sync (`messages.history-set`) fires **once**, on the initial pairing. Every subsequent reconnect delivers only live traffic. That's a trap: a restart would otherwise start from an empty buffer and tools would return stale or partial results. The server keeps a 1500-message-per-group ring buffer in memory, snapshots it to `.baileys_auth-<session>/buffer.json` every 60 seconds, and rehydrates on boot. The snapshot is load-bearing — do not treat it as a cache. When a group still has older history on WhatsApp's servers, `whatsapp_sync_history` backfills on demand (needs at least one anchor message already buffered). Do not enable `syncFullHistory` with a desktop browser identity on an already-paired Android account — WhatsApp rejects that handshake and the client loops on status 428.
 
 **Readiness gate, not a spinlock.** On cold start there's a window between "process alive" and "ready to serve." The server doesn't answer tool calls during that window; it returns `503 Service Unavailable` with a retry hint until `connection.update → open` fires AND the buffer is either drained from `history-set` or 30 seconds have elapsed. Clients that retry sensibly get clean results. Clients that don't fail fast instead of getting silently wrong data.
 
