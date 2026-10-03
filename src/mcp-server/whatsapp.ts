@@ -354,6 +354,7 @@ export class WhatsAppClient {
     this.sock = makeWASocket({
       auth: state,
       version,
+      syncFullHistory: true,
       logger: WhatsAppClient.BAILEYS_LOGGER,
       getMessage: async (key) => {
         const entry = this.buffer.findById(key.id || '');
