@@ -8,6 +8,7 @@ import pino from 'pino';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { format } from 'date-fns';
+import { ContactBook } from './contacts.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -310,7 +311,7 @@ export class WhatsAppClient {
   private ready = false;
   private buffer: MessageBuffer;
   private mutex = new AsyncMutex(100);
-  private contacts = new Map<string, string>();
+  private contacts: ContactBook;
   private connectionOpen = false;
   private bufferWarm = false;
   private readyResolve: (() => void) | null = null;
@@ -324,6 +325,7 @@ export class WhatsAppClient {
 
   constructor(private readonly sessionName: string) {
     this.buffer = new MessageBuffer(WhatsAppClient.AUTH_DIR);
+    this.contacts = new ContactBook(WhatsAppClient.CONTACTS_PATH);
   }
 
   // -----------------------------------------------------------------------
@@ -744,9 +746,7 @@ export class WhatsAppClient {
 
   private loadContacts(): void {
     try {
-      if (!existsSync(WhatsAppClient.CONTACTS_PATH)) return;
-      const data = JSON.parse(readFileSync(WhatsAppClient.CONTACTS_PATH, 'utf-8'));
-      for (const [id, name] of Object.entries(data)) this.contacts.set(id, String(name));
+      this.contacts.load();
       log('info', `Loaded ${this.contacts.size} contact names`);
     } catch (err) {
       log('warn', 'Could not load contacts.json', err);
@@ -755,12 +755,7 @@ export class WhatsAppClient {
 
   private saveContacts(): void {
     try {
-      mkdirSync(WhatsAppClient.AUTH_DIR, { recursive: true });
-      writeFileSync(
-        WhatsAppClient.CONTACTS_PATH,
-        JSON.stringify(Object.fromEntries(this.contacts)),
-        'utf-8',
-      );
+      this.contacts.save();
     } catch (err) {
       log('warn', 'Could not save contacts.json', err);
     }
