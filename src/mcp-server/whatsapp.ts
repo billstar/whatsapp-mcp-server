@@ -6,7 +6,8 @@ import makeWASocket, {
 import type { WASocket, WAMessage, GroupMetadata } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { format } from 'date-fns';
 
 // ---------------------------------------------------------------------------
@@ -317,7 +318,9 @@ export class WhatsAppClient {
   private destroying = false;
   private saveCreds: (() => Promise<void>) | null = null;
 
-  private static readonly AUTH_DIR = '.baileys_auth';
+  // Anchored to the package root so the paired session is found no matter
+  // which directory the MCP client launches the server from.
+  private static readonly AUTH_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.baileys_auth');
   private static readonly BAILEYS_LOGGER = pino({ level: 'silent' }, pino.destination(2));
 
   constructor(private readonly sessionName: string) {
