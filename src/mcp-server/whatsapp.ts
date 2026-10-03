@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { format } from 'date-fns';
+import { ContactBook } from './contacts.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -311,20 +312,23 @@ export class WhatsAppClient {
   private ready = false;
   private buffer: MessageBuffer;
   private mutex = new AsyncMutex(100);
-  private contacts = new Map<string, string>();
+  private contacts: ContactBook;
   private connectionOpen = false;
   private bufferWarm = false;
   private readyResolve: (() => void) | null = null;
   private destroying = false;
+  private contactsTimer: ReturnType<typeof setInterval> | null = null;
   private saveCreds: (() => Promise<void>) | null = null;
 
   // Anchored to the package root so the paired session is found no matter
   // which directory the MCP client launches the server from.
   private static readonly AUTH_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.baileys_auth');
   private static readonly BAILEYS_LOGGER = pino({ level: 'silent' }, pino.destination(2));
+  private static readonly CONTACTS_PATH = join(WhatsAppClient.AUTH_DIR, 'contacts.json');
 
   constructor(private readonly sessionName: string) {
     this.buffer = new MessageBuffer(WhatsAppClient.AUTH_DIR);
+    this.contacts = new ContactBook(WhatsAppClient.CONTACTS_PATH);
   }
 
   // -----------------------------------------------------------------------
@@ -334,6 +338,7 @@ export class WhatsAppClient {
   async initialize(): Promise<void> {
     log('info', 'Initializing WhatsApp client (Baileys)...');
 
+    this.loadContacts();
     const rehydrated = this.buffer.rehydrate();
     this.bufferWarm = rehydrated;
 
@@ -341,6 +346,7 @@ export class WhatsAppClient {
     await this.waitForReady();
 
     this.buffer.startPeriodicSnapshot();
+    this.contactsTimer = setInterval(() => this.saveContacts(), 60_000);
     log(
       'info',
       `WhatsApp client ready (buffer: ${this.buffer.totalSize} messages across ${this.buffer.groupCount} groups)`,
@@ -378,6 +384,8 @@ export class WhatsAppClient {
     this.ready = false;
     this.buffer.snapshot();
     this.buffer.stopPeriodicSnapshot();
+    if (this.contactsTimer) clearInterval(this.contactsTimer);
+    this.saveContacts();
     try {
       this.sock?.end(undefined);
     } catch {
@@ -435,11 +443,11 @@ export class WhatsAppClient {
       id: e.id,
       body: e.body,
       author: e.author,
-      authorName: e.authorName,
+      authorName: this.entryName(e),
       timestamp: e.timestamp,
       hasMedia: e.hasMedia,
       isForwarded: e.isForwarded,
-      quotedMsg: e.quotedMsg,
+      quotedMsg: this.resolveQuoted(e.quotedMsg),
     }));
 
     log('info', `getGroupMessages: returning ${result.length} messages`);
@@ -490,11 +498,11 @@ export class WhatsAppClient {
       id: e.id,
       body: e.body,
       author: e.author,
-      authorName: e.authorName,
+      authorName: this.entryName(e),
       timestamp: e.timestamp,
       hasMedia: e.hasMedia,
       isForwarded: e.isForwarded,
-      quotedMsg: e.quotedMsg,
+      quotedMsg: this.resolveQuoted(e.quotedMsg),
     }));
 
     log('info', `searchMessages: returning ${results.length} results`);
@@ -518,7 +526,7 @@ export class WhatsAppClient {
       const body = e.hasMedia ? '<Media omitted>' : (e.body || '');
 
       const bodyLines = body.split('\n');
-      lines.push(`[${dateStr}] ${e.authorName}: ${bodyLines[0]}`);
+      lines.push(`[${dateStr}] ${this.entryName(e)}: ${bodyLines[0]}`);
       for (let i = 1; i < bodyLines.length; i++) {
         lines.push(bodyLines[i]);
       }
@@ -713,6 +721,11 @@ export class WhatsAppClient {
       };
     }
 
+    // Group senders live in key.participant for live messages but in the
+    // top-level WebMessageInfo.participant for history-synced ones.
+    const sender = msg.key.participant || msg.participant || '';
+    this.learnName(msg, sender);
+
     const timestamp =
       typeof msg.messageTimestamp === 'number'
         ? msg.messageTimestamp
@@ -721,23 +734,64 @@ export class WhatsAppClient {
     return {
       id: msg.key.id || '',
       body,
-      author: msg.key.participant || msg.key.remoteJid || '',
-      authorName: this.resolveAuthorName(msg),
+      author: sender || msg.key.remoteJid || '',
+      authorName: this.resolveAuthorName(msg, sender),
       timestamp,
       hasMedia,
       isForwarded: !!contextInfo?.isForwarded,
       fromMe: msg.key.fromMe || false,
       quotedMsg,
-      waKey: msg.key,
+      // Keep the sender in the key so quoted replies in groups are well-formed.
+      waKey: sender ? { ...msg.key, participant: sender } : msg.key,
       waMessage: msg.message,
     };
   }
 
-  private resolveAuthorName(msg: WAMessage): string {
-    if (msg.pushName) return msg.pushName;
+  private loadContacts(): void {
+    try {
+      this.contacts.load();
+      log('info', `Loaded ${this.contacts.size} contact names`);
+    } catch (err) {
+      log('warn', 'Could not load contacts.json', err);
+    }
+  }
+
+  private saveContacts(): void {
+    try {
+      this.contacts.save();
+    } catch (err) {
+      log('warn', 'Could not save contacts.json', err);
+    }
+  }
+
+  private entryName(e: BufferEntry): string {
+    return e.fromMe ? e.authorName : this.nameFor(e.author, e.authorName);
+  }
+
+  private resolveQuoted(
+    q: { body: string; author: string } | undefined,
+  ): { body: string; author: string } | undefined {
+    return q ? { ...q, author: q.author ? this.nameFor(q.author) : q.author } : q;
+  }
+
+  /** Record a sender's display name under every ID alias WhatsApp gave us. */
+  private learnName(msg: WAMessage, sender: string): void {
+    if (!msg.pushName || msg.key.fromMe) return;
+    const key = msg.key as { participantPn?: string; participantLid?: string };
+    for (const id of [sender, key.participantPn, key.participantLid]) {
+      if (id) this.contacts.set(id, msg.pushName);
+    }
+  }
+
+  private resolveAuthorName(msg: WAMessage, sender: string): string {
     if (msg.key.fromMe) return this.sock?.user?.name || 'Me';
-    const jid = msg.key.participant || msg.key.remoteJid || '';
-    return this.contacts.get(jid) || jid.replace(/@.*/, '') || 'Unknown';
+    if (sender) return this.nameFor(sender, msg.pushName || '');
+    return msg.pushName || 'Unknown';
+  }
+
+  /** Display name for a JID: latest known name, else the stored one, else the number. */
+  private nameFor(jid: string, fallback = ''): string {
+    return this.contacts.get(jid) || fallback || jid.replace(/@.*/, '') || 'Unknown';
   }
 
   private extractBody(msg: WAMessage): string {
