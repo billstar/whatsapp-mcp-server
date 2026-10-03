@@ -2,8 +2,9 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
+  normalizeMessageContent,
 } from '@whiskeysockets/baileys';
-import type { WASocket, WAMessage, GroupMetadata } from '@whiskeysockets/baileys';
+import type { WASocket, WAMessage, GroupMetadata, proto } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
@@ -127,6 +128,8 @@ interface BufferEntry {
   hasMedia: boolean;
   isForwarded: boolean;
   fromMe: boolean;
+  /** True when this entry came from an edit of an earlier message. */
+  edited?: boolean;
   quotedMsg?: { body: string; author: string };
   waKey: any;
   waMessage: any;
@@ -190,6 +193,22 @@ class MessageBuffer {
 
     const existingIds = new Set(buf.map((e) => e.id));
     for (const entry of entries) {
+      if (existingIds.has(entry.id) && entry.edited) {
+        // An edit replaces the text of the original, which keeps its timestamp.
+        const idx = buf.findIndex((e) => e.id === entry.id);
+        if (idx >= 0) {
+          // Keep the original key and payload: replies must quote the original
+          // message id, and getMessage() retries resend the original.
+          buf[idx] = {
+            ...entry,
+            timestamp: buf[idx].timestamp,
+            waKey: buf[idx].waKey,
+            waMessage: buf[idx].waMessage,
+            edited: undefined,
+          };
+        }
+        continue;
+      }
       if (!existingIds.has(entry.id)) {
         buf.push(entry);
         existingIds.add(entry.id);
@@ -846,7 +865,7 @@ export class WhatsAppClient {
         : Number(msg.messageTimestamp) || 0;
 
     return {
-      id: msg.key.id || '',
+      id: this.editTargetId(msg) || msg.key.id || '',
       body,
       author: sender || msg.key.remoteJid || '',
       authorName: this.resolveAuthorName(msg, sender),
@@ -854,6 +873,7 @@ export class WhatsAppClient {
       hasMedia,
       isForwarded: !!contextInfo?.isForwarded,
       fromMe: msg.key.fromMe || false,
+      edited: this.editTargetId(msg) ? true : undefined,
       quotedMsg,
       // Keep the sender in the key so quoted replies in groups are well-formed.
       waKey: sender ? { ...msg.key, participant: sender } : msg.key,
@@ -908,8 +928,29 @@ export class WhatsAppClient {
     return this.contacts.get(jid) || fallback || jid.replace(/@.*/, '') || 'Unknown';
   }
 
+  /**
+   * The effective content of a message. WhatsApp wraps some messages (edited,
+   * disappearing, view-once, document-with-caption) in an outer layer, and an
+   * edit carries its replacement text inside a protocolMessage. Without
+   * unwrapping, those messages have no text or media and would be dropped.
+   */
+  private contentOf(msg: WAMessage): proto.IMessage | undefined {
+    let content = normalizeMessageContent(msg.message ?? undefined);
+    const replacement = content?.protocolMessage?.editedMessage;
+    if (replacement) content = normalizeMessageContent(replacement);
+    return content ?? undefined;
+  }
+
+  /** For an edit, the ID of the message being edited; otherwise undefined. */
+  private editTargetId(msg: WAMessage): string | undefined {
+    const content = normalizeMessageContent(msg.message ?? undefined);
+    return content?.protocolMessage?.editedMessage
+      ? content.protocolMessage.key?.id ?? undefined
+      : undefined;
+  }
+
   private extractBody(msg: WAMessage): string {
-    const m = msg.message;
+    const m = this.contentOf(msg);
     if (!m) return '';
     return (
       m.conversation ||
@@ -925,7 +966,7 @@ export class WhatsAppClient {
   }
 
   private checkMedia(msg: WAMessage): boolean {
-    const m = msg.message;
+    const m = this.contentOf(msg);
     if (!m) return false;
     return !!(
       m.imageMessage ||
@@ -937,7 +978,7 @@ export class WhatsAppClient {
   }
 
   private extractContextInfo(msg: WAMessage): any {
-    const m = msg.message;
+    const m = this.contentOf(msg);
     if (!m) return null;
     return (
       m.extendedTextMessage?.contextInfo ||
