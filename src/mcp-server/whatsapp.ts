@@ -4,6 +4,7 @@ import makeWASocket, {
   DisconnectReason,
 } from '@whiskeysockets/baileys';
 import type { WASocket, WAMessage, GroupMetadata } from '@whiskeysockets/baileys';
+import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -141,7 +142,7 @@ interface BufferEntry {
 
 class MessageBuffer {
   private buffers = new Map<string, BufferEntry[]>();
-  private readonly maxPerGroup = 500;
+  readonly maxPerGroup = 1500;
   private readonly snapshotPath: string;
   private snapshotInterval: NodeJS.Timeout | null = null;
   private _lastUpsertTs = 0;
@@ -322,13 +323,30 @@ export class WhatsAppClient {
 
   // Anchored to the package root so the paired session is found no matter
   // which directory the MCP client launches the server from.
-  private static readonly AUTH_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.baileys_auth');
+  /**
+   * Session directory, anchored to the package root. Keyed by session name
+   * (`.baileys_auth-<name>`) so separate sessions never share credentials.
+   * Installs that predate per-session directories keep using `.baileys_auth`
+   * when it exists and the named directory doesn't, so no paired session moves.
+   */
+  static resolveAuthDir(sessionName: string, root = join(dirname(fileURLToPath(import.meta.url)), '..', '..')): string {
+    if (!/^[A-Za-z0-9._-]+$/.test(sessionName) || sessionName.startsWith('.')) {
+      throw new Error(`Invalid WHATSAPP_SESSION_NAME "${sessionName}": use letters, digits, ".", "_" or "-"`);
+    }
+    const named = join(root, `.baileys_auth-${sessionName}`);
+    const legacy = join(root, '.baileys_auth');
+    if (existsSync(named)) return named;
+    if (existsSync(legacy)) return legacy;
+    return named;
+  }
+
+  private readonly authDir: string;
   private static readonly BAILEYS_LOGGER = pino({ level: 'silent' }, pino.destination(2));
-  private static readonly CONTACTS_PATH = join(WhatsAppClient.AUTH_DIR, 'contacts.json');
 
   constructor(private readonly sessionName: string) {
-    this.buffer = new MessageBuffer(WhatsAppClient.AUTH_DIR);
-    this.contacts = new ContactBook(WhatsAppClient.CONTACTS_PATH);
+    this.authDir = WhatsAppClient.resolveAuthDir(sessionName);
+    this.buffer = new MessageBuffer(this.authDir);
+    this.contacts = new ContactBook(join(this.authDir, 'contacts.json'));
   }
 
   // -----------------------------------------------------------------------
@@ -336,7 +354,7 @@ export class WhatsAppClient {
   // -----------------------------------------------------------------------
 
   async initialize(): Promise<void> {
-    log('info', 'Initializing WhatsApp client (Baileys)...');
+    log('info', `Initializing WhatsApp client (Baileys), session dir: ${this.authDir}`);
 
     this.loadContacts();
     const rehydrated = this.buffer.rehydrate();
@@ -354,7 +372,7 @@ export class WhatsAppClient {
   }
 
   private async createSocket(): Promise<void> {
-    const { state, saveCreds } = await useMultiFileAuthState(WhatsAppClient.AUTH_DIR);
+    const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
     this.saveCreds = saveCreds;
 
     const { version } = await fetchLatestBaileysVersion();
@@ -364,6 +382,12 @@ export class WhatsAppClient {
       auth: state,
       version,
       logger: WhatsAppClient.BAILEYS_LOGGER,
+      // NOTE: do NOT set syncFullHistory:true + a desktop browser (Browsers.macOS)
+      // here. That makes Baileys claim the DARWIN platform and request a full
+      // history handshake, which this already-android-paired account rejects —
+      // producing a tight statusCode=428 reconnect loop that never reaches
+      // 'open'. The full seed only works on a fresh pairing anyway. On-demand
+      // backfill (syncGroupHistory / fetchMessageHistory) works without it.
       getMessage: async (key) => {
         const entry = this.buffer.findById(key.id || '');
         return entry?.waMessage || undefined;
@@ -452,6 +476,87 @@ export class WhatsAppClient {
 
     log('info', `getGroupMessages: returning ${result.length} messages`);
     return result;
+  }
+
+  /**
+   * On-demand history backfill for one group. Walks backwards from the oldest
+   * message currently in the buffer, requesting older chunks from WhatsApp via
+   * fetchMessageHistory. Results arrive asynchronously on the
+   * messaging-history.set (ON_DEMAND) event, which upserts them into the same
+   * buffer — so each round we fire a request and poll for the buffer to grow.
+   *
+   * Hard constraints, surfaced to the caller rather than hidden:
+   *  - Needs an anchor: a group with zero buffered messages has nothing to walk
+   *    back from. It must be seeded first (live message or full-history sync).
+   *  - Bounded by MessageBuffer.maxPerGroup (the local per-group cap).
+   *  - Bounded by what WhatsApp's servers still retain — when a round returns
+   *    nothing new, older history is simply gone and we stop.
+   */
+  async syncGroupHistory(
+    groupId: string,
+    targetCount = 1500,
+  ): Promise<{ synced: number; total: number; note?: string }> {
+    this.ensureReady();
+    const cap = Math.min(targetCount, this.buffer.maxPerGroup);
+    const startCount = this.buffer.getForGroup(groupId).length;
+
+    if (startCount === 0) {
+      return {
+        synced: 0,
+        total: 0,
+        note:
+          'No anchor message for this group — on-demand history needs at least ' +
+          'one existing message to walk back from. Seed it first via a fresh ' +
+          'full-history sync (re-pair) or by waiting for a live message.',
+      };
+    }
+
+    const MAX_ROUNDS = 12;
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const buf = this.buffer.getForGroup(groupId);
+      if (buf.length >= cap) break;
+
+      const oldest = buf[0]; // buffer is sorted ascending by timestamp
+      const want = Math.min(50, cap - buf.length);
+      const baseline = buf.length;
+
+      log(
+        'info',
+        `syncGroupHistory: ${groupId} round ${round + 1}, requesting ${want} before ts=${oldest.timestamp}`,
+      );
+      await this.mutex.run(() =>
+        this.sock!.fetchMessageHistory(want, oldest.waKey, oldest.timestamp),
+      );
+
+      // ON_DEMAND results come back on the messaging-history.set event.
+      const grew = await this.waitForBufferGrowth(groupId, baseline, 15_000);
+      if (!grew) {
+        log('info', `syncGroupHistory: ${groupId} no more history returned — stopping`);
+        break;
+      }
+    }
+
+    const total = this.buffer.getForGroup(groupId).length;
+    return { synced: total - startCount, total };
+  }
+
+  private waitForBufferGrowth(
+    groupId: string,
+    baseline: number,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const iv = setInterval(() => {
+        if (this.buffer.getForGroup(groupId).length > baseline) {
+          clearInterval(iv);
+          resolve(true);
+        } else if (Date.now() - start > timeoutMs) {
+          clearInterval(iv);
+          resolve(false);
+        }
+      }, 500);
+    });
   }
 
   async getGroupInfo(groupId: string): Promise<WhatsAppGroupInfo> {
@@ -622,7 +727,16 @@ export class WhatsAppClient {
       },
     );
 
-    this.sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+    this.sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+      if (qr) {
+        // First-time pairing. Render to stderr — stdout carries the MCP
+        // protocol under the stdio transport and must not be polluted.
+        log(
+          'info',
+          'Pair this device: WhatsApp → Settings → Linked Devices → Link a device, then scan:',
+        );
+        qrcode.generate(qr, { small: true }, (art) => process.stderr.write(`${art}\n`));
+      }
       if (connection === 'open') {
         log('info', 'Connection open');
         this.connectionOpen = true;
